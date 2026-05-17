@@ -18,7 +18,7 @@ func TestHTTPAuthenticator(t *testing.T) {
 
 	time.Sleep(1 * time.Second) // Wait for the server to start
 
-	auth := NewHTTPAuthenticator("http://127.0.0.1:5000/auth", false)
+	auth := NewHTTPAuthenticator("http://127.0.0.1:5000/auth", false, "hysteria2", "test-node")
 
 	ok, id := auth.Authenticate(&net.UDPAddr{
 		IP:   net.ParseIP("1.2.3.4"),

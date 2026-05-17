@@ -167,6 +167,8 @@ type serverConfigCongestion struct {
 type serverConfigAuthHTTP struct {
 	URL      string `mapstructure:"url"`
 	Insecure bool   `mapstructure:"insecure"`
+	Protocol string `mapstructure:"protocol"` // 协议标识，如 "hysteria2"
+	NodeID   string `mapstructure:"nodeID"`   // 本节点标识
 }
 
 type serverConfigAuth struct {
@@ -1366,7 +1368,10 @@ func (c *serverConfig) fillAuthenticator(hyConfig *server.Config) error {
 		if c.Auth.HTTP.URL == "" {
 			return configError{Field: "auth.http.url", Err: errors.New("empty auth http url")}
 		}
-		hyConfig.Authenticator = auth.NewHTTPAuthenticator(c.Auth.HTTP.URL, c.Auth.HTTP.Insecure)
+		hyConfig.Authenticator = auth.NewHTTPAuthenticator(
+			c.Auth.HTTP.URL, c.Auth.HTTP.Insecure,
+			c.Auth.HTTP.Protocol, c.Auth.HTTP.NodeID,
+		)
 		return nil
 	case "command", "cmd":
 		if c.Auth.Command == "" {
