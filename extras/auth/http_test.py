@@ -8,16 +8,16 @@ def auth():
     data = request.json
 
     if data is None:
-        return jsonify({"ok": False, "id": ""}), 400
+        return jsonify({"ok": False, "id": "", "msg": "invalid json", "ttl": 0}), 400
 
-    addr = data.get("addr", "")
-    auth = data.get("auth", "")
+    remote_addr = data.get("remote_addr", "")
+    credential = data.get("credential", "")
     tx = data.get("tx", 0)
 
-    if addr == "123.123.123.123:5566" and auth == "wahaha" and tx == 12345:
-        return jsonify({"ok": True, "id": "some_unique_id"})
+    if remote_addr == "123.123.123.123:5566" and credential == "wahaha" and tx == 12345:
+        return jsonify({"ok": True, "id": "some_unique_id", "msg": "", "ttl": 60})
     else:
-        return jsonify({"ok": False, "id": ""})
+        return jsonify({"ok": False, "id": "", "msg": "invalid", "ttl": 0})
 
 
 if __name__ == "__main__":
