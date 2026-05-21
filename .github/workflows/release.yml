@@ -42,15 +42,24 @@ jobs:
     name: Deploy to test server
     needs: publish
     runs-on: ubuntu-latest
-    if: vars.DEPLOY_SSH_HOST != '' || secrets.DEPLOY_SSH_HOST != ''
     steps:
+      - name: Check SSH secrets
+        id: check
+        run: |
+          if [ -n "${{ secrets.DEPLOY_SSH_HOST }}" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+          fi
       - name: Download build
+        if: steps.check.outputs.available == 'true'
         uses: actions/download-artifact@v8
         with:
           name: build-temp-${{ github.sha }}
           path: build
 
       - name: Set up SSH
+        if: steps.check.outputs.available == 'true'
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
@@ -58,6 +67,7 @@ jobs:
           ssh-keyscan -H ${{ secrets.DEPLOY_SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Stop running service
+        if: steps.check.outputs.available == 'true'
         run: |
           ssh -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=accept-new \
@@ -65,6 +75,7 @@ jobs:
             "sudo systemctl stop hysteria || true"
 
       - name: Deploy binary
+        if: steps.check.outputs.available == 'true'
         run: |
           scp -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=accept-new \
@@ -72,6 +83,7 @@ jobs:
             ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}:/tmp/hysteria
 
       - name: Install and restart service
+        if: steps.check.outputs.available == 'true'
         run: |
           ssh -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=accept-new \
@@ -82,5 +94,5 @@ jobs:
              sudo systemctl status hysteria --no-pager"
 
       - name: Clean up SSH key
-        if: always()
+        if: always() && steps.check.outputs.available == 'true'
         run: rm -f ~/.ssh/deploy_key
