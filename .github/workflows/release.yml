@@ -1,0 +1,86 @@
+name: "Build release"
+
+on:
+  push:
+    tags:
+      - v*.*.*
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-common.yml
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Get version
+        id: get_version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Download build
+        uses: actions/download-artifact@v8
+        with:
+          name: build-temp-${{ github.sha }}
+          path: build
+
+      - name: Upload GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: v${{ steps.get_version.outputs.version }}
+          files: build/*
+          generate_release_notes: true
+
+  deploy:
+    name: Deploy to test server
+    needs: publish
+    runs-on: ubuntu-latest
+    if: vars.DEPLOY_SSH_HOST != '' || secrets.DEPLOY_SSH_HOST != ''
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v8
+        with:
+          name: build-temp-${{ github.sha }}
+          path: build
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Stop running service
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=accept-new \
+            ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }} \
+            "sudo systemctl stop hysteria || true"
+
+      - name: Deploy binary
+        run: |
+          scp -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=accept-new \
+            build/hysteria-linux-amd64 \
+            ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}:/tmp/hysteria
+
+      - name: Install and restart service
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=accept-new \
+            ${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }} \
+            "sudo mv /tmp/hysteria /usr/local/bin/hysteria && \
+             sudo chmod +x /usr/local/bin/hysteria && \
+             sudo systemctl start hysteria && \
+             sudo systemctl status hysteria --no-pager"
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
