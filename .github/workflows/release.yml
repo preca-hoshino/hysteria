@@ -5,6 +5,9 @@ on:
     tags:
       - v*.*.*
 
+permissions:
+  contents: write
+
 jobs:
   build:
     uses: ./.github/workflows/build-common.yml
@@ -20,11 +23,6 @@ jobs:
       - name: Get version
         id: get_version
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
 
       - name: Download build
         uses: actions/download-artifact@v8
@@ -43,6 +41,7 @@ jobs:
     name: Deploy to test server
     needs: publish
     runs-on: ubuntu-latest
+    if: vars.DEPLOY_SSH_HOST != '' || secrets.DEPLOY_SSH_HOST != ''
     steps:
       - name: Download build
         uses: actions/download-artifact@v8

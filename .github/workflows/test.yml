@@ -10,11 +10,13 @@ on:
       - master
       - custom-main
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out
         uses: actions/checkout@v6
@@ -33,7 +35,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install gofumpt
-        run: go install mvdan.cc/gofumpt@latest
+        run: go install mvdan.cc/gofumpt@v0.7.0
 
       - name: Check format
         run: python hyperbole.py format-check
