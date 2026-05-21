@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - master
+      - custom-main
   pull_request:
     branches:
       - master
+      - custom-main
 
 jobs:
   test:

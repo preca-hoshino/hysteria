@@ -23,6 +23,8 @@ const (
 type TrafficStatsServer interface {
 	server.TrafficLogger
 	http.Handler
+	// SetRestartFunc sets a callback that will be invoked when POST /restart is called.
+	SetRestartFunc(fn func() error)
 }
 
 func NewTrafficStatsServer(secret string) TrafficStatsServer {
@@ -36,12 +38,17 @@ func NewTrafficStatsServer(secret string) TrafficStatsServer {
 }
 
 type trafficStatsServerImpl struct {
-	Mutex     sync.RWMutex
-	StatsMap  map[string]*trafficStatsEntry
-	OnlineMap map[string]int
-	StreamMap map[server.HyStream]*server.StreamStats
-	KickMap   map[string]struct{}
-	Secret    string
+	Mutex       sync.RWMutex
+	StatsMap    map[string]*trafficStatsEntry
+	OnlineMap   map[string]int
+	StreamMap   map[server.HyStream]*server.StreamStats
+	KickMap     map[string]struct{}
+	Secret      string
+	RestartFunc func() error
+}
+
+func (s *trafficStatsServerImpl) SetRestartFunc(fn func() error) {
+	s.RestartFunc = fn
 }
 
 type trafficStatsEntry struct {
@@ -122,6 +129,10 @@ func (s *trafficStatsServerImpl) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/dump/streams" {
 		s.getDumpStreams(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/restart" {
+		s.handleRestart(w, r)
 		return
 	}
 	http.NotFound(w, r)
@@ -280,6 +291,43 @@ func (s *trafficStatsServerImpl) getDumpStreams(w http.ResponseWriter, r *http.R
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// handleRestart triggers a graceful restart of the server.
+// It accepts an optional JSON body: {"protocol": "hysteria2"} and returns
+// {"ok": true, "restarted_at": "..."} on success.
+func (s *trafficStatsServerImpl) handleRestart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Protocol string `json:"protocol"`
+	}
+	json.NewDecoder(r.Body).Decode(&body) // best-effort parse, ignore errors
+
+	if s.RestartFunc == nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":    false,
+			"error": "restart not available",
+		})
+		return
+	}
+
+	if err := s.RestartFunc(); err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":    false,
+			"error": err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":           true,
+		"restarted_at": time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 func (s *trafficStatsServerImpl) kick(w http.ResponseWriter, r *http.Request) {

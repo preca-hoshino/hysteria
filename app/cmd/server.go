@@ -83,6 +83,8 @@ type serverConfig struct {
 	Outbounds             []serverConfigOutboundEntry `mapstructure:"outbounds"`
 	TrafficStats          serverConfigTrafficStats    `mapstructure:"trafficStats"`
 	Masquerade            serverConfigMasquerade      `mapstructure:"masquerade"`
+
+	tss trafficlogger.TrafficStatsServer // set by fillTrafficLogger, used by runServer for restart
 }
 
 type serverConfigRealm struct {
@@ -1393,6 +1395,7 @@ func (c *serverConfig) fillTrafficLogger(hyConfig *server.Config) error {
 	if c.TrafficStats.Listen != "" {
 		tss := trafficlogger.NewTrafficStatsServer(c.TrafficStats.Secret)
 		hyConfig.TrafficLogger = tss
+		c.tss = tss
 		go runTrafficStatsServer(c.TrafficStats.Listen, tss)
 	}
 	return nil
@@ -1538,53 +1541,98 @@ func runServerCmd(cmd *cobra.Command, args []string) {
 }
 
 func runServer(v *viper.Viper) {
-	if err := v.ReadInConfig(); err != nil {
-		logger.Fatal("failed to read server config", zap.Error(err))
-	}
-	var config serverConfig
-	if err := v.Unmarshal(&config); err != nil {
-		logger.Fatal("failed to parse server config", zap.Error(err))
-	}
-	hyConfig, err := config.Config()
-	if err != nil {
-		logger.Fatal("failed to load server config", zap.Error(err))
-	}
-
-	s, err := server.NewServer(hyConfig)
-	if err != nil {
-		logger.Fatal("failed to initialize server", zap.Error(err))
-	}
-	if config.Listen != "" {
-		logger.Info("server up and running", zap.String("listen", config.Listen))
-	} else {
-		logger.Info("server up and running", zap.String("listen", defaultListenAddr))
-	}
-
-	if !disableUpdateCheck {
-		go runCheckUpdateServer()
-	}
-
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signalChan)
 
-	serveErrChan := make(chan error, 1)
-	go func() {
-		serveErrChan <- s.Serve()
-	}()
+	// restartCh is used by the trafficStats /restart handler to trigger a
+	// graceful restart of the QUIC server (close → re-read config → new server).
+	restartCh := make(chan struct{}, 1)
 
-	select {
-	case <-signalChan:
-		logger.Info("received signal, shutting down gracefully")
-		if err := s.Close(); err != nil {
-			logger.Error("failed to shut down server cleanly", zap.Error(err))
+	// Keep the trafficStats server alive across restarts — only the QUIC
+	// server is recreated; the stats HTTP endpoint stays running.
+	var tss trafficlogger.TrafficStatsServer
+
+	for {
+		if err := v.ReadInConfig(); err != nil {
+			logger.Fatal("failed to read server config", zap.Error(err))
 		}
-		if err := <-serveErrChan; err != nil {
-			logger.Info("server stopped", zap.Error(err))
+		var config serverConfig
+		if err := v.Unmarshal(&config); err != nil {
+			logger.Fatal("failed to parse server config", zap.Error(err))
 		}
-	case err := <-serveErrChan:
+		hyConfig, err := config.Config()
 		if err != nil {
-			logger.Fatal("failed to serve", zap.Error(err))
+			logger.Fatal("failed to load server config", zap.Error(err))
+		}
+
+		// First iteration: save TSS reference. Subsequent iterations:
+		// restore TSS to the new config and re-bind TrafficLogger so
+		// the new server connects to the same stats endpoint.
+		if tss == nil {
+			tss = config.tss
+		} else {
+			config.tss = tss
+			hyConfig.TrafficLogger = tss
+		}
+
+		// Wire the restart callback to the trafficStats HTTP server so that
+		// POST /restart triggers a graceful restart of the QUIC server.
+		if tss != nil {
+			tss.SetRestartFunc(func() error {
+				select {
+				case restartCh <- struct{}{}:
+				default:
+				}
+				return nil
+			})
+		}
+
+		s, err := server.NewServer(hyConfig)
+		if err != nil {
+			logger.Fatal("failed to initialize server", zap.Error(err))
+		}
+		if config.Listen != "" {
+			logger.Info("server up and running", zap.String("listen", config.Listen))
+		} else {
+			logger.Info("server up and running", zap.String("listen", defaultListenAddr))
+		}
+
+		if !disableUpdateCheck {
+			go runCheckUpdateServer()
+		}
+
+		serveErrChan := make(chan error, 1)
+		go func() {
+			serveErrChan <- s.Serve()
+		}()
+
+		select {
+		case <-signalChan:
+			logger.Info("received signal, shutting down gracefully")
+			if err := s.Close(); err != nil {
+				logger.Error("failed to shut down server cleanly", zap.Error(err))
+			}
+			if err := <-serveErrChan; err != nil {
+				logger.Info("server stopped", zap.Error(err))
+			}
+			return // exit the loop, process terminates
+
+		case <-restartCh:
+			logger.Info("received restart request, reloading...")
+			if err := s.Close(); err != nil {
+				logger.Error("failed to close old server during restart", zap.Error(err))
+			}
+			if err := <-serveErrChan; err != nil {
+				logger.Info("old server stopped", zap.Error(err))
+			}
+			// Loop back: re-read config, create new server
+			logger.Info("restart: re-reading config and creating new server")
+
+		case err := <-serveErrChan:
+			if err != nil {
+				logger.Fatal("failed to serve", zap.Error(err))
+			}
 		}
 	}
 }

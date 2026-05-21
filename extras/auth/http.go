@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	httpAuthTimeout       = 10 * time.Second
-	defaultCacheTTL       = 60 * time.Second
-	defaultCacheMaxSize   = 16384
+	httpAuthTimeout     = 10 * time.Second
+	defaultCacheTTL     = 60 * time.Second
+	defaultCacheMaxSize = 16384
 )
 
 var _ server.Authenticator = &HTTPAuthenticator{}
@@ -36,7 +36,7 @@ type HTTPAuthenticator struct {
 	Protocol string // 协议标识，如 "hysteria2"
 	NodeID   string // 本节点标识
 
-	cache    sync.Map // credential(string) → *cacheEntry
+	cache sync.Map // credential(string) → *cacheEntry
 }
 
 func NewHTTPAuthenticator(url string, insecure bool, protocol, nodeID string) *HTTPAuthenticator {
