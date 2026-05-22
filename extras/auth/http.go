@@ -2,9 +2,11 @@ package auth
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,6 +20,8 @@ const (
 	httpAuthTimeout     = 10 * time.Second
 	defaultCacheTTL     = 60 * time.Second
 	defaultCacheMaxSize = 16384
+	denyCacheTTL        = 5 * time.Second
+	maxAllowCacheTTL    = 5 * time.Minute
 )
 
 var _ server.Authenticator = &HTTPAuthenticator{}
@@ -36,7 +40,8 @@ type HTTPAuthenticator struct {
 	Protocol string // 协议标识，如 "hysteria2"
 	NodeID   string // 本节点标识
 
-	cache sync.Map // credential(string) → *cacheEntry
+	allowCache sync.Map // SHA256(credential) → *cacheEntry
+	denyCache  sync.Map // SHA256(credential) → time.Time
 }
 
 func NewHTTPAuthenticator(url string, insecure bool, protocol, nodeID string) *HTTPAuthenticator {
@@ -98,18 +103,34 @@ func (a *HTTPAuthenticator) post(req *httpAuthRequest) (*httpAuthResponse, error
 	return &authResp, nil
 }
 
+// hashCredential returns the hex-encoded SHA256 hash of the credential.
+// Cache keys use the hash so plaintext credentials never sit in memory as map keys.
+func hashCredential(credential string) string {
+	sum := sha256.Sum256([]byte(credential))
+	return fmt.Sprintf("%x", sum)
+}
+
 func (a *HTTPAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) (ok bool, id string) {
-	// 第一关：查本地缓存
-	if v, hit := a.cache.Load(auth); hit {
+	key := hashCredential(auth)
+
+	// 第一关：拒绝缓存（防暴力破解，5s 内不重复请求认证中心）
+	if v, hit := a.denyCache.Load(key); hit {
+		if time.Now().Before(v.(time.Time)) {
+			return false, ""
+		}
+		a.denyCache.Delete(key)
+	}
+
+	// 第二关：放行缓存
+	if v, hit := a.allowCache.Load(key); hit {
 		entry := v.(*cacheEntry)
 		if time.Now().Before(entry.expiresAt) {
 			return true, entry.authID
 		}
-		// 过期，删除
-		a.cache.Delete(auth)
+		a.allowCache.Delete(key)
 	}
 
-	// 第二关：POST 统一认证中心
+	// 第三关：POST 统一认证中心
 	req := &httpAuthRequest{
 		RemoteAddr: addr.String(),
 		Credential: auth,
@@ -120,15 +141,20 @@ func (a *HTTPAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) 
 	}
 	resp, err := a.post(req)
 	if err != nil || !resp.OK {
+		// 写入拒绝缓存
+		a.denyCache.Store(key, time.Now().Add(denyCacheTTL))
 		return false, ""
 	}
 
-	// 写入本地缓存
+	// 写入放行缓存（硬上限 5min）
 	ttl := resp.TTL
 	if ttl <= 0 {
 		ttl = int64(defaultCacheTTL.Seconds())
 	}
-	a.cache.Store(auth, &cacheEntry{
+	if ttl > int64(maxAllowCacheTTL.Seconds()) {
+		ttl = int64(maxAllowCacheTTL.Seconds())
+	}
+	a.allowCache.Store(key, &cacheEntry{
 		authID:    resp.ID,
 		expiresAt: time.Now().Add(time.Duration(ttl) * time.Second),
 	})

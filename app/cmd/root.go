@@ -2,9 +2,12 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -125,7 +128,17 @@ func initFlags() {
 func initConfig() {
 	defaultViper = viper.New()
 	if cfgFile != "" {
-		defaultViper.SetConfigFile(cfgFile)
+		if strings.HasPrefix(cfgFile, "http://") || strings.HasPrefix(cfgFile, "https://") {
+			// 远程配置：下载到临时文件后加载
+			tmpFile, err := fetchRemoteConfig(cfgFile)
+			if err != nil {
+				fmt.Printf("failed to fetch remote config from %s: %s\n", cfgFile, err)
+				os.Exit(1)
+			}
+			defaultViper.SetConfigFile(tmpFile)
+		} else {
+			defaultViper.SetConfigFile(cfgFile)
+		}
 	} else {
 		defaultViper.SetConfigName("config")
 		defaultViper.SetConfigType("yaml")
@@ -134,6 +147,39 @@ func initConfig() {
 		defaultViper.AddConfigPath("$HOME/.hysteria")
 		defaultViper.AddConfigPath("/etc/hysteria/")
 	}
+}
+
+// fetchRemoteConfig downloads a config from the given URL and returns the path
+// to a temporary file containing the downloaded content.
+func fetchRemoteConfig(url string) (string, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("http get: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
+	if err != nil {
+		return "", fmt.Errorf("read body: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "hysteria-remote-config-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	if _, err := tmpFile.Write(body); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("write temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	return tmpFile.Name(), nil
 }
 
 func initLogger() {
